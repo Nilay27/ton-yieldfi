@@ -1,0 +1,143 @@
+#include "imports/stdlib.fc";
+
+;; ------------------------------------------------------------------------------
+;; OPCODES (string->int like in Counter.fc)
+;; ------------------------------------------------------------------------------
+const op::setTokens = "op::setTokens"c;
+const op::deposit   = "op::deposit"c;
+const op::withdraw  = "op::withdraw"c;
+
+;; ------------------------------------------------------------------------------
+;; GLOBAL STORAGE (similar to Counter)
+;; We store 3 fields in the main cell, 2 in a reference cell to avoid bit overflow.
+;; ------------------------------------------------------------------------------
+global int g_adminPubkey;  ;; 256 bits
+global int g_sToken;       ;; 256 bits
+global int g_yToken;       ;; 256 bits
+global int g_treasury;     ;; 256 bits (will be in ref)
+global int g_isVault;      ;; 1 bit   (will be in ref)
+
+;; ------------------------------------------------------------------------------
+;; LOADING & SAVING DATA
+;; ------------------------------------------------------------------------------
+() load_data() impure {
+    ;; Parse from get_data()
+    var ds = get_data().begin_parse();
+
+    ;; 1) load 3 fields from main cell
+    g_adminPubkey = ds~load_uint(256);
+    g_sToken      = ds~load_uint(256);
+    g_yToken      = ds~load_uint(256);
+
+    ;; 2) load reference for treasury & isVault
+    var refCell = ds~load_ref();
+    var rds = refCell.begin_parse();
+    g_treasury = rds~load_uint(256);
+    g_isVault  = rds~load_uint(1);
+
+    rds.end_parse();
+    ds.end_parse();
+}
+
+() save_data() impure {
+    ;; Build main cell with 3 fields
+    var mainCell = begin_cell()
+        .store_uint(g_adminPubkey, 256)
+        .store_uint(g_sToken, 256)
+        .store_uint(g_yToken, 256);
+
+    ;; Then store a reference cell for treasury & isVault
+    var refBuilder = begin_cell()
+        .store_uint(g_treasury, 256)
+        .store_uint(g_isVault, 1);
+
+    mainCell.store_ref(refBuilder.end_cell());
+    set_data(mainCell.end_cell());
+}
+
+;; ------------------------------------------------------------------------------
+;; HELPER FUNCTIONS for each opcode
+;; ------------------------------------------------------------------------------
+() handle_setTokens(slice in_msg_body) impure {
+    ;; parse sToken, yToken, isVault
+    var newSToken  = in_msg_body~load_uint(256);
+    var newYToken  = in_msg_body~load_uint(256);
+    var newIsVault = in_msg_body~load_uint(1);
+
+    ;; update global state
+    g_sToken  = newSToken;
+    g_yToken  = newYToken;
+    g_isVault = newIsVault;
+
+    save_data();
+}
+
+() handle_deposit(slice in_msg_body) impure {
+    ;; parse depositAmount (64 bits)
+    var depositAmount = in_msg_body~load_uint(64);
+
+    ;; In a real contract, do your deposit logic
+    ;; For now, we just store and do nothing
+    ;; Possibly store deposit in g_sToken or something, but let's keep it simple.
+    accept_message();
+}
+
+() handle_withdraw(slice in_msg_body) impure {
+    ;; parse withdrawAmount (64 bits)
+    var withdrawAmount = in_msg_body~load_uint(64);
+
+    ;; In a real contract, do your withdraw logic
+    accept_message();
+}
+
+;; ------------------------------------------------------------------------------
+;; MAIN ENTRY POINT for internal inbound messages (like in Counter)
+;; ------------------------------------------------------------------------------
+() recv_internal(int my_balance, int msg_value, cell in_msg_full, slice in_msg_body) impure {
+    if (in_msg_body.slice_empty?()) {
+        return ();
+    }
+
+    ;; check bounce flag
+    slice cs = in_msg_full.begin_parse();
+    int flags = cs~load_uint(4);
+    if (flags & 1) {
+        ;; message bounced, ignore
+        return ();
+    }
+
+    ;; load data from storage
+    load_data();
+
+    ;; parse op code (32 bits) + query_id (64 bits)
+    int op = in_msg_body~load_uint(32);
+    int query_id = in_msg_body~load_uint(64);
+
+    if (op == op::setTokens) {
+        handle_setTokens(in_msg_body);
+        return ();
+    }
+    if (op == op::deposit) {
+        handle_deposit(in_msg_body);
+        return ();
+    }
+    if (op == op::withdraw) {
+        handle_withdraw(in_msg_body);
+        return ();
+    }
+
+    throw(0xffff); ;; unknown op
+}
+
+;; ------------------------------------------------------------------------------
+;; GET METHODS - for testing
+;; ------------------------------------------------------------------------------
+int get_stoken() method_id {
+    load_data();
+    return g_sToken;
+}
+
+int get_is_vault() method_id {
+    load_data();
+    return g_isVault;
+}
