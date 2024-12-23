@@ -1,14 +1,14 @@
 import { Blockchain, SandboxContract, TreasuryContract } from '@ton/sandbox';
 import { Cell, toNano } from '@ton/core';
 import { compile } from '@ton/blueprint';
-import { Manager, ManagerConfig } from '../wrappers/Manager';
+import { Manager } from '../wrappers/Manager';
 import '@ton/test-utils';
 
 describe('Manager', () => {
     let code: Cell;
 
     beforeAll(async () => {
-        // Compile the Manager.fc
+        // Compile from contracts/Manager.fc
         code = await compile('Manager');
     });
 
@@ -17,26 +17,24 @@ describe('Manager', () => {
     let manager: SandboxContract<Manager>;
 
     beforeEach(async () => {
-        // create a fresh local blockchain
         blockchain = await Blockchain.create();
-
-        // deployer wallet
         deployer = await blockchain.treasury('deployer');
 
-        // initial config
-        const config: ManagerConfig = {
-            adminPubkey: 123n,
-            sToken: 456n,
-            yToken: 789n,
-            treasury: 999n,
-            isVault: false,
-        };
+        // Create the contract with sToken=123, isVault=false as an example
+        manager = blockchain.openContract(
+            Manager.createFromConfig(
+                {
+                    sToken: 123,
+                    isVault: false,
+                },
+                code
+            )
+        );
 
-        // create contract
-        manager = blockchain.openContract(Manager.createFromConfig(config, code));
-
-        // deploy
+        // Deploy
         const deployResult = await manager.sendDeploy(deployer.getSender(), toNano('0.05'));
+
+        // Check deployment
         expect(deployResult.transactions).toHaveTransaction({
             from: deployer.address,
             to: manager.address,
@@ -46,65 +44,58 @@ describe('Manager', () => {
     });
 
     it('should deploy and read initial stoken / isVault', async () => {
-        const provider = blockchain.provider(manager.address);
         const stoken = await manager.getStoken();
-        expect(stoken).toBe(456n);
+        expect(stoken).toBe(123);
 
         const vaultFlag = await manager.getIsVault();
         expect(vaultFlag).toBe(false);
     });
 
     it('should set tokens', async () => {
-        const provider = blockchain.provider(manager.address);
-
-        const res = await manager.sendSetTokens( deployer.getSender(), {
-            value: toNano('0.05'),
-            newSToken: 999n,
-            newYToken: 1000n,
+        // set sToken=999, isVault=true
+        const setResult = await manager.sendSetTokens(deployer.getSender(), {
+            value: toNano('0.5'),
+            newSToken: 999,
             newIsVault: true,
         });
 
-        expect(res.transactions).toHaveTransaction({
+        expect(setResult.transactions).toHaveTransaction({
             from: deployer.address,
             to: manager.address,
             success: true,
         });
+        
 
-        // check updated
+        // read back
         const stoken = await manager.getStoken();
-        expect(stoken).toBe(999n);
+        expect(stoken).toBe(999);
 
         const vaultFlag = await manager.getIsVault();
         expect(vaultFlag).toBe(true);
     });
 
     it('should deposit', async () => {
-        const provider = blockchain.provider(manager.address);
-
-        const res = await manager.sendDeposit( deployer.getSender(), {
-            value: toNano('0.05'),
-            depositAmount: 42,
+        const depositResult = await manager.sendDeposit(deployer.getSender(), {
+            value: toNano('0.5'),
+            depositAmount: 50,
         });
 
-        expect(res.transactions).toHaveTransaction({
+        expect(depositResult.transactions).toHaveTransaction({
             from: deployer.address,
             to: manager.address,
             success: true,
         });
 
-        // Nothing is stored in the contract about deposit yet,
-        // so we just check that the transaction succeeded.
+        // No state change here, but at least we confirm success
     });
 
     it('should withdraw', async () => {
-        const provider = blockchain.provider(manager.address);
-
-        const res = await manager.sendWithdraw( deployer.getSender(), {
-            value: toNano('0.05'),
-            withdrawAmount: 13,
+        const withdrawResult = await manager.sendWithdraw(deployer.getSender(), {
+            value: toNano('0.5'),
+            withdrawAmount: 12,
         });
 
-        expect(res.transactions).toHaveTransaction({
+        expect(withdrawResult.transactions).toHaveTransaction({
             from: deployer.address,
             to: manager.address,
             success: true,
