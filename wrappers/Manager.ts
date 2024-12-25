@@ -8,10 +8,13 @@ import {
     Sender,
     SendMode,
 } from '@ton/core';
-import { crc32 } from 'crc'; // You'll need to install this package
+import { crc32 } from 'crc'; // Ensure the crc library is installed
 
 export type ManagerConfig = {
-    sToken: number;
+    adminPubkey: string;      // public key as hex string
+    sToken: Address;          // Address type
+    yToken: Address;          // Address type
+    treasury: Address;        // Address type
     isVault: boolean;
 };
 
@@ -20,22 +23,27 @@ function calculateOpcode(opName: string): number {
     return crc32(opName) >>> 0; // Use unsigned shift to ensure the result is a 32-bit unsigned integer
 }
 
-
 export function managerConfigToCell(config: ManagerConfig): Cell {
-    // store 32 bits for sToken, 1 bit for isVault
+    const refCell = beginCell()
+        .storeAddress(config.treasury)
+        .storeBit(config.isVault ? 1 : 0)
+        .endCell();
+    
     return beginCell()
-        .storeUint(config.sToken, 32)
-        .storeUint(config.isVault ? 1 : 0, 1)
+        .storeBuffer(Buffer.from(config.adminPubkey, 'hex'))  // Store public key as Buffer
+        .storeAddress(config.sToken)
+        .storeAddress(config.yToken)
+        .storeRef(refCell)
         .endCell();
 }
 
+
 // Define the opcodes dynamically
 export const ManagerOpcodes = {
-    setTokens: calculateOpcode("op::setTokens"), // Dynamically calculated CRC32
-    deposit: calculateOpcode("op::deposit"),    // Dynamically calculated CRC32
-    withdraw: calculateOpcode("op::withdraw"),  // Dynamically calculated CRC32
+    setTokens: calculateOpcode("op::setTokens"),
+    deposit: calculateOpcode("op::deposit"),
+    withdraw: calculateOpcode("op::withdraw"),
 };
-
 
 export class Manager implements Contract {
     constructor(readonly address: Address, readonly init?: { code: Cell; data: Cell }) {}
@@ -50,15 +58,7 @@ export class Manager implements Contract {
         return new Manager(contractAddress(workchain, init), init);
     }
 
-    /**
-     * Deploy the contract by sending an empty body.
-     * Return { transactions: ... } so the test can do `expect(result.transactions).toHaveTransaction(...)`.
-     */
-    async sendDeploy(
-        provider: ContractProvider,
-        via: Sender,
-        value: bigint
-    ) {
+    async sendDeploy(provider: ContractProvider, via: Sender, value: bigint) {
         await provider.internal(via, {
             value,
             sendMode: SendMode.PAY_GAS_SEPARATELY,
@@ -66,25 +66,31 @@ export class Manager implements Contract {
         });
     }
 
-    /**
-     * setTokens
-     * [ opcode(32), queryId(64), newSToken(32), newIsVault(1) ]
-     */
     async sendSetTokens(
         provider: ContractProvider,
         via: Sender,
         opts: {
             value: bigint;
             queryID?: number;
-            newSToken: number;
+            signature: Buffer;
+            newSToken: Address;
+            newYToken: Address;
+            newTreasury: Address;
             newIsVault: boolean;
         }
-    ){
+    ) {
+        const refCell = beginCell()
+            .storeAddress(opts.newSToken)     // Store as Address
+            .storeAddress(opts.newYToken)     // Store as Address
+            .storeAddress(opts.newTreasury)   // Store as Address
+            .storeBit(opts.newIsVault ? 1 : 0) // Store as 1 bit
+            .endCell();
+
         const body = beginCell()
             .storeUint(ManagerOpcodes.setTokens, 32)
             .storeUint(opts.queryID ?? 0, 64)
-            .storeUint(opts.newSToken, 32)
-            .storeUint(opts.newIsVault ? 1 : 0, 1)
+            .storeBuffer(opts.signature)
+            .storeRef(refCell)
             .endCell();
 
         await provider.internal(via, {
@@ -94,22 +100,20 @@ export class Manager implements Contract {
         });
     }
 
-    /**
-     * deposit
-     * [ opcode(32), queryId(64), depositAmount(32) ]
-     */
     async sendDeposit(
         provider: ContractProvider,
         via: Sender,
         opts: {
             value: bigint;
             queryID?: number;
+            signature: Buffer;
             depositAmount: number;
         }
     ) {
         const body = beginCell()
             .storeUint(ManagerOpcodes.deposit, 32)
             .storeUint(opts.queryID ?? 0, 64)
+            .storeBuffer(opts.signature)
             .storeUint(opts.depositAmount, 32)
             .endCell();
 
@@ -120,10 +124,6 @@ export class Manager implements Contract {
         });
     }
 
-    /**
-     * withdraw
-     * [ opcode(32), queryId(64), withdrawAmount(32) ]
-     */
     async sendWithdraw(
         provider: ContractProvider,
         via: Sender,
@@ -131,11 +131,13 @@ export class Manager implements Contract {
             value: bigint;
             queryID?: number;
             withdrawAmount: number;
+            signature: Buffer;
         }
     ) {
         const body = beginCell()
             .storeUint(ManagerOpcodes.withdraw, 32)
             .storeUint(opts.queryID ?? 0, 64)
+            .storeBuffer(opts.signature)
             .storeUint(opts.withdrawAmount, 32)
             .endCell();
 
@@ -146,19 +148,28 @@ export class Manager implements Contract {
         });
     }
 
-    /**
-     * get_stoken => read g_sToken
-     */
-    async getStoken(provider: ContractProvider): Promise<number> {
-        const res = await provider.get('get_stoken', []);
-        return res.stack.readNumber();
+    async getStoken(provider: ContractProvider): Promise<Address> {
+        const result = await provider.get('get_stoken', []);
+        return result.stack.readAddress();
     }
 
-    /**
-     * get_is_vault => read g_isVault
-     */
+    async getYToken(provider: ContractProvider): Promise<Address> {
+        const result = await provider.get('get_ytoken', []);
+        return result.stack.readAddress();
+    }
+
+    async getTreasury(provider: ContractProvider): Promise<Address> {
+        const result = await provider.get('get_treasury', []);
+        return result.stack.readAddress();
+    }
+
     async getIsVault(provider: ContractProvider): Promise<boolean> {
-        const res = await provider.get('get_is_vault', []);
-        return res.stack.readNumber() === 1;
+        const result = await provider.get('get_is_vault', []);
+        return result.stack.readNumber() === 1;
+    }
+
+    async getAdminPubkey(provider: ContractProvider): Promise<string> {
+        const result = await provider.get('get_admin_pubkey', []);
+        return result.stack.readBigNumber().toString(16);
     }
 }
