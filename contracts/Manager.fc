@@ -7,6 +7,8 @@ const op::setTokens = "op::setTokens"c;
 const op::deposit   = "op::deposit"c;
 const op::withdraw  = "op::withdraw"c;
 const op::setTreasury = "op::setTreasury"c;
+const op::setAsset = "op::setAsset"c;
+
 ;; ---------------------------------------------------------------------
 ;; GLOBAL STORAGE
 ;; - g_adminPubkey: 256 bits
@@ -20,6 +22,11 @@ global slice g_sToken;
 global slice g_yToken;
 global slice g_treasury;
 global int g_isVault;
+global cell g_assets;  
+const int ADDRESS_SIZE = 257; ;; 256 address + 1 bit
+
+
+(slice, int) dict_get?(cell dict, int key_len, slice index) asm(index dict key_len) "DICTGET" "NULLSWAPIFNOT";
 
 
 ;; ---------------------------------------------------------------------
@@ -35,6 +42,7 @@ global int g_isVault;
     slice ref_slice = ds~load_ref().begin_parse();
     g_treasury = ref_slice~load_msg_addr();
     g_isVault = ref_slice~load_uint(1);
+    g_assets = ref_slice~load_dict();
     
     ds.end_parse();
 }
@@ -51,6 +59,7 @@ global int g_isVault;
                 begin_cell()
                     .store_slice(g_treasury)  ;; 256 bits for treasury (Address)
                     .store_uint(g_isVault, 1)      ;; 1 bit for isVault
+                    .store_dict(g_assets)
                 .end_cell()
             )
         .end_cell()
@@ -130,6 +139,25 @@ global int g_isVault;
 }
 
 ;; ---------------------------------------------------------------------
+;; ASSET MANAGEMENT
+;; ---------------------------------------------------------------------
+
+() handle_setAsset(slice in_msg_body) impure {
+    ;; Validate signature
+    _validateSignature(in_msg_body);
+
+    ;; Load asset address and status
+    slice asset_address = in_msg_body~load_msg_addr();
+    int status = in_msg_body~load_uint(1);
+
+    ;; Update asset status in dictionary with addr as key and status as slice
+    g_assets~dict_set(ADDRESS_SIZE, asset_address, begin_cell().store_uint(status, 1).end_cell().begin_parse());
+    save_data();
+    accept_message();
+}
+
+
+;; ---------------------------------------------------------------------
 ;; MAIN ENTRY POINT
 ;; ---------------------------------------------------------------------
 () recv_internal(int my_balance, int msg_value, cell in_msg_full, slice in_msg_body) impure {
@@ -165,6 +193,10 @@ global int g_isVault;
         handle_setTreasury(in_msg_body);
         return ();
     }
+    if (op == op::setAsset) {
+        handle_setAsset(in_msg_body);
+        return ();
+    }
 
     throw(0xffff); ;; Unknown operation
 }
@@ -195,4 +227,18 @@ int get_is_vault() method_id {
 int get_admin_pubkey() method_id {
     load_data();
     return g_adminPubkey;
+}
+
+;; Get method to check if asset is enabled
+(int) is_asset_enabled(slice asset_address) method_id {
+    load_data();
+    (slice status_slice, int found) = g_assets.dict_get?(ADDRESS_SIZE, asset_address);
+    if (found == -1) {
+        ;; Asset found, extract status
+        int status = status_slice~load_uint(1);
+        return status;
+    } else {
+        ;; Asset not found, default to 0 (false)
+        return 0;
+    }
 }

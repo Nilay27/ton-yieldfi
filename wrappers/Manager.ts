@@ -7,6 +7,7 @@ import {
     ContractProvider,
     Sender,
     SendMode,
+    Dictionary,
 } from '@ton/core';
 import { crc32 } from 'crc'; // Ensure the crc library is installed
 
@@ -16,6 +17,7 @@ export type ManagerConfig = {
     yToken: Address;          // Address type
     treasury: Address;        // Address type
     isVault: boolean;
+    assets?: Dictionary<Address, boolean>;  // Optional dictionary of assets
 };
 
 // Helper function to calculate the opcode dynamically
@@ -27,6 +29,7 @@ export function managerConfigToCell(config: ManagerConfig): Cell {
     const refCell = beginCell()
         .storeAddress(config.treasury)
         .storeBit(config.isVault ? 1 : 0)
+        .storeDict(config.assets || null)
         .endCell();
     
     return beginCell()
@@ -44,6 +47,7 @@ export const ManagerOpcodes = {
     deposit: calculateOpcode("op::deposit"),
     withdraw: calculateOpcode("op::withdraw"),
     setTreasury: calculateOpcode("op::setTreasury"),
+    setAsset: calculateOpcode("op::setAsset"),
 };
 
 export class Manager implements Contract {
@@ -171,6 +175,33 @@ export class Manager implements Contract {
         });
     }
 
+    async sendSetAsset(
+        provider: ContractProvider,
+        via: Sender,
+        opts: {
+            value: bigint;
+            queryID?: number;
+            signature: Buffer;
+            asset: Address;
+            status: boolean;
+        }
+    ) {
+        const status = opts.status ? 1 : 0;
+        const body = beginCell()
+            .storeUint(ManagerOpcodes.setAsset, 32)
+            .storeUint(opts.queryID ?? 0, 64)
+            .storeBuffer(opts.signature)
+            .storeAddress(opts.asset)
+            .storeBit(status)
+            .endCell();
+
+        await provider.internal(via, {
+            value: opts.value,
+            sendMode: SendMode.PAY_GAS_SEPARATELY,
+            body,
+        });
+    }
+
     async getStoken(provider: ContractProvider): Promise<Address> {
         const result = await provider.get('get_stoken', []);
         return result.stack.readAddress();
@@ -194,5 +225,14 @@ export class Manager implements Contract {
     async getAdminPubkey(provider: ContractProvider): Promise<string> {
         const result = await provider.get('get_admin_pubkey', []);
         return result.stack.readBigNumber().toString(16);
+    }
+
+    async getIsAssetEnabled(provider: ContractProvider, asset: Address): Promise<boolean> {
+        const result = await provider.get('is_asset_enabled', [
+            { type: 'slice', cell: beginCell()
+                .storeAddress(asset)
+                .endCell() }
+        ]);
+        return result.stack.readNumber() === 1;
     }
 }

@@ -1,5 +1,5 @@
 import { Blockchain, SandboxContract, TreasuryContract } from '@ton/sandbox';
-import { Cell, toNano, beginCell, Address } from '@ton/core';
+import { Cell, toNano, beginCell, Address, Dictionary } from '@ton/core';
 import { keyPairFromSeed, sign, getSecureRandomBytes } from '@ton/crypto';
 import { compile } from '@ton/blueprint';
 import { Manager, ManagerConfig } from '../wrappers/Manager';
@@ -38,16 +38,13 @@ describe('Manager', () => {
         sTokenAddress = randomAddress(); // Replace with actual method if necessary
         yTokenAddress = randomAddress(); // Replace with actual method if necessary
         treasuryAddress = randomAddress();
-        console.log('sToken address:', sTokenAddress.toString());
-        console.log('yToken address:', yTokenAddress.toString());
-        console.log('treasury address:', treasuryAddress.toString());
-
         const config: ManagerConfig = {
             adminPubkey: adminKeyPair.publicKey.toString('hex'),
             sToken: sTokenAddress,
             yToken: yTokenAddress,
             treasury: treasuryAddress,
             isVault: false,
+            assets: Dictionary.empty(),
         };
 
         manager = blockchain.openContract(Manager.createFromConfig(config, code));
@@ -122,12 +119,12 @@ describe('Manager', () => {
 
             const stoken = await manager.getStoken();
             const ytoken = await manager.getYToken();
-            const treasury = await manager.getTreasury();
             const vaultFlag = await manager.getIsVault();
-
+            const isEnabled = await manager.getIsAssetEnabled(newSTokenAddress);
             expect(stoken.toString()).toEqual(newSTokenAddress.toString());
             expect(ytoken.toString()).toEqual(newYTokenAddress.toString());
             expect(vaultFlag).toBe(false);
+            expect(isEnabled).toBe(false);
         });
 
         it('should fail to set tokens with invalid admin signature', async () => {
@@ -265,7 +262,6 @@ describe('Manager', () => {
                 to: manager.address,
                 success: true,
             });
-
         });
 
         it('should fail to withdraw with invalid admin signature', async () => {
@@ -286,6 +282,61 @@ describe('Manager', () => {
                 success: false,
                 exitCode: 65534,
             });
+            
+        });
+    });
+
+    describe('Asset Management', () => {
+        it('should set asset status with valid admin signature', async () => {
+            const assetAddress = randomAddress();
+            const message = beginCell()
+                .storeAddress(assetAddress)
+                .storeBit(true)
+                .endCell();
+            
+            const signature = sign(message.hash(), adminKeyPair.secretKey);
+
+            const setAssetResult = await manager.sendSetAsset(deployer.getSender(), {
+                value: toNano('0.5'),
+                signature,
+                asset: assetAddress,
+                status: true,
+            });
+            expect(setAssetResult.transactions).toHaveTransaction({
+                from: deployer.address,
+                to: manager.address,
+                success: true,
+            });
+        });
+
+        it('should fail to set asset with invalid admin signature', async () => {
+            const assetAddress = randomAddress();
+            const message = beginCell()
+                .storeAddress(assetAddress)
+                .storeBit(true)
+                .endCell();
+            
+            const signature = sign(message.hash(), fakeAdminKeyPair.secretKey);
+
+            const setAssetResult = await manager.sendSetAsset(deployer.getSender(), {
+                value: toNano('0.5'),
+                signature,
+                asset: assetAddress,
+                status: true,
+            });
+
+            expect(setAssetResult.transactions).toHaveTransaction({
+                from: deployer.address,
+                to: manager.address,
+                success: false,
+                exitCode: 65534,
+            });
+        });
+
+        it('should return false for non-existent asset', async () => {
+            const randomAsset = randomAddress();
+            const isEnabled = await manager.getIsAssetEnabled(randomAsset);
+            console.log("Asset enabled status:", isEnabled);
         });
     });
 });
