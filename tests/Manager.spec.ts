@@ -93,13 +93,11 @@ describe('Manager', () => {
         it('should set tokens with valid admin signature', async () => {
             const newSTokenAddress = randomAddress();
             const newYTokenAddress = randomAddress();
-            const newTreasuryAddress = randomAddress();
 
             // Create the same reference cell that will be sent to the contract
             const refCell = beginCell()
                 .storeAddress(newSTokenAddress)
                 .storeAddress(newYTokenAddress)
-                .storeAddress(newTreasuryAddress)
                 .storeBit(false) // newIsVault
                 .endCell();
 
@@ -113,7 +111,6 @@ describe('Manager', () => {
                 signature,
                 newSToken: newSTokenAddress,
                 newYToken: newYTokenAddress,
-                newTreasury: newTreasuryAddress,
                 newIsVault: false,
             });
 
@@ -130,20 +127,17 @@ describe('Manager', () => {
 
             expect(stoken.toString()).toEqual(newSTokenAddress.toString());
             expect(ytoken.toString()).toEqual(newYTokenAddress.toString());
-            expect(treasury.toString()).toEqual(newTreasuryAddress.toString());
             expect(vaultFlag).toBe(false);
         });
 
         it('should fail to set tokens with invalid admin signature', async () => {
             const newSTokenAddress = randomAddress();
             const newYTokenAddress = randomAddress();
-            const newTreasuryAddress = randomAddress();
 
             // Create the same reference cell that will be sent to the contract
             const refCell = beginCell()
                 .storeAddress(newSTokenAddress)
                 .storeAddress(newYTokenAddress)
-                .storeAddress(newTreasuryAddress)
                 .storeBit(false) // newIsVault
                 .endCell();
 
@@ -157,11 +151,49 @@ describe('Manager', () => {
                 signature,
                 newSToken: newSTokenAddress,
                 newYToken: newYTokenAddress,
-                newTreasury: newTreasuryAddress,
                 newIsVault: false,
             });
 
             expect(setResult.transactions).toHaveTransaction({
+                from: deployer.address,
+                to: manager.address,
+                success: false,
+                exitCode: 65534,
+            });
+        });
+    });
+
+    describe('Set Treasury Functionality', () => {
+        it('should set treasury with valid admin signature', async () => {
+            const newTreasuryAddress = randomAddress();
+            const message = beginCell().storeAddress(newTreasuryAddress).endCell();
+            const signature = sign(message.hash(), adminKeyPair.secretKey);
+
+            const setTreasuryResult = await manager.sendSetTreasury(deployer.getSender(), {
+                value: toNano('0.5'),
+                signature,
+                newTreasury: newTreasuryAddress,
+            });
+
+            expect(setTreasuryResult.transactions).toHaveTransaction({
+                from: deployer.address,
+                to: manager.address,
+                success: true,
+            });
+        });
+
+        it('should fail to set treasury with invalid admin signature', async () => {
+            const newTreasuryAddress = randomAddress();
+            const message = beginCell().storeAddress(newTreasuryAddress).endCell();
+            const signature = sign(message.hash(), fakeAdminKeyPair.secretKey);
+
+            const setTreasuryResult = await manager.sendSetTreasury(deployer.getSender(), {
+                value: toNano('0.5'),
+                signature,
+                newTreasury: newTreasuryAddress,
+            });
+
+            expect(setTreasuryResult.transactions).toHaveTransaction({
                 from: deployer.address,
                 to: manager.address,
                 success: false,

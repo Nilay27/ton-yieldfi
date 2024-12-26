@@ -6,7 +6,7 @@
 const op::setTokens = "op::setTokens"c;
 const op::deposit   = "op::deposit"c;
 const op::withdraw  = "op::withdraw"c;
-
+const op::setTreasury = "op::setTreasury"c;
 ;; ---------------------------------------------------------------------
 ;; GLOBAL STORAGE
 ;; - g_adminPubkey: 256 bits
@@ -94,7 +94,6 @@ global int g_isVault;
     slice rs = ref.begin_parse();
     g_sToken = rs~load_msg_addr();
     g_yToken = rs~load_msg_addr();
-    g_treasury = rs~load_msg_addr();
     g_isVault = rs~load_uint(1);
 
     save_data();
@@ -117,6 +116,16 @@ global int g_isVault;
 
     var withdrawAmount = in_msg_body~load_uint(32);
     ;; Handle withdraw logic
+    accept_message();
+}
+
+() handle_setTreasury(slice in_msg_body) impure {
+    ;; Validate signature if needed
+    _validateSignature(in_msg_body);
+
+    ;; Load the reference cell containing the new addresses
+    g_treasury = in_msg_body~load_msg_addr();
+    save_data();
     accept_message();
 }
 
@@ -144,12 +153,16 @@ global int g_isVault;
         handle_setTokens(in_msg_body);
         return ();
     }
-    if (op == op::deposit) {
+    elseif (op == op::deposit) {
         handle_deposit(in_msg_body);
         return ();
     }
-    if (op == op::withdraw) {
+    elseif (op == op::withdraw) {
         handle_withdraw(in_msg_body);
+        return ();
+    }
+    elseif (op == op::setTreasury) {
+        handle_setTreasury(in_msg_body);
         return ();
     }
 

@@ -43,6 +43,7 @@ export const ManagerOpcodes = {
     setTokens: calculateOpcode("op::setTokens"),
     deposit: calculateOpcode("op::deposit"),
     withdraw: calculateOpcode("op::withdraw"),
+    setTreasury: calculateOpcode("op::setTreasury"),
 };
 
 export class Manager implements Contract {
@@ -75,14 +76,12 @@ export class Manager implements Contract {
             signature: Buffer;
             newSToken: Address;
             newYToken: Address;
-            newTreasury: Address;
             newIsVault: boolean;
         }
     ) {
         const refCell = beginCell()
             .storeAddress(opts.newSToken)     // Store as Address
             .storeAddress(opts.newYToken)     // Store as Address
-            .storeAddress(opts.newTreasury)   // Store as Address
             .storeBit(opts.newIsVault ? 1 : 0) // Store as 1 bit
             .endCell();
 
@@ -99,6 +98,30 @@ export class Manager implements Contract {
             body,
         });
     }
+
+    async sendSetTreasury(
+        provider: ContractProvider,
+        via: Sender,
+        opts: {
+            value: bigint;
+            queryID?: number;
+            signature: Buffer;
+            newTreasury: Address;
+        }
+    ) {
+        const body = beginCell()
+            .storeUint(ManagerOpcodes.setTreasury, 32)
+            .storeUint(opts.queryID ?? 0, 64)
+            .storeBuffer(opts.signature)
+            .storeAddress(opts.newTreasury)
+            .endCell();
+
+        await provider.internal(via, {
+            value: opts.value,
+            sendMode: SendMode.PAY_GAS_SEPARATELY,
+            body,
+        });
+    }   
 
     async sendDeposit(
         provider: ContractProvider,
