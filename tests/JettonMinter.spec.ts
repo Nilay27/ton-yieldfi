@@ -4,13 +4,14 @@ import { compile } from '@ton/blueprint';
 import { JettonMinter, JettonMinterConfig, JettonMinterOpcodes } from '../wrappers/JettonMinter';
 import '@ton/test-utils';
 import { randomAddress } from '@ton/test-utils';
+import { JettonWallet } from '../wrappers/JettonWallet';
 
 describe('JettonMinter', () => {
     let code: Cell;
     let blockchain: Blockchain;
     let deployer: SandboxContract<TreasuryContract>;
     let jettonMinter: SandboxContract<JettonMinter>;
-    let jettonWalletCode: Cell;
+    let jettonWalletCode: Cell;    
 
     beforeAll(async () => {
         code = await compile('JettonMinter');
