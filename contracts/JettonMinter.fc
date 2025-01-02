@@ -1,7 +1,16 @@
-;; Jettons discoverable smart contract
-
-;; storage scheme
-;; storage#_ total_supply:Coins admin_address:MsgAddress content:^Cell jetton_wallet_code:^Cell = Storage;
+;; -----------------------------------------------------------------------------
+;; YTokenL2Minter.fc
+;; A simple extension of the standard JettonMinter with YTokenL2-like functionality:
+;;
+;;  - Blacklist dictionary
+;;  - Sync (tracking supply changes)
+;;  - Oracle price
+;;  - sToken address
+;;  - Deposit / Withdraw stubs
+;;  - Rescue (send out TON)
+;;  - Mint/Burn restricted to admin
+;;
+;; -----------------------------------------------------------------------------
 
 #include "imports/stdlib.fc";
 #include "imports/jetton-utils.fc";
@@ -10,40 +19,99 @@
 #include "imports/constants.fc";
 #pragma version >=0.2.0;
 
-;; ---------------------------------------------------------------------
-;; OP CODES
-;; ---------------------------------------------------------------------
-const op::mint = "op::mint"c;
-const op::burn_notification = "op::burn_notification"c;
+;; -----------------------------------------------------------------------------
+;; Original OP Codes (unchanged except we also define new ones further below)
+;; -----------------------------------------------------------------------------
+const op::mint                   = "op::mint"c;
+const op::burn_notification      = "op::burn_notification"c;
 const op::provide_wallet_address = "op::provide_wallet_address"c;
-const op::take_wallet_address = "op::take_wallet_address"c;
-const op::change_admin = "op::change_admin"c;
-const op::change_content = "op::change_content"c;
-const op::excesses = "op::excesses"c;
-const op::change_admin = "op::change_admin"c;
-const op::change_content = "op::change_content"c;
+const op::take_wallet_address    = "op::take_wallet_address"c;
+const op::change_admin           = "op::change_admin"c;
+const op::change_content         = "op::change_content"c;
+const op::excesses               = "op::excesses"c;
+;; (Note: the original has `change_admin` and `change_content` repeated, we keep them as is)
 
+;; -----------------------------------------------------------------------------
+;; New OP Codes for YTokenL2-like logic
+;; -----------------------------------------------------------------------------
+const op::set_price          = "op::set_price"c;          ;; set oracle-based price
+const op::set_stoken         = "op::set_stoken"c;         ;; set sToken address
+const op::sync_jetton        = "op::sync_jetton"c;        ;; track supply changes
+const op::deposit            = "op::deposit"c;            ;; deposit stub
+const op::withdraw           = "op::withdraw"c;           ;; withdraw stub
+const op::rescue             = "op::rescue"c;             ;; rescue leftover TON
+const op::set_blacklisted    = "op::set_blacklisted"c;    ;; set blacklist status (0 or 1)
 
-(int, slice, cell, cell) load_data() inline {
+;; -----------------------------------------------------------------------------
+;; Data Layout
+;; -----------------------------------------------------------------------------
+;; We keep the original four fields in the main data:
+;;   1) total_supply
+;;   2) admin_address
+;;   3) content
+;;   4) jetton_wallet_code
+;;
+;; Then we store additional fields in **one reference cell**:
+;;   a) last_sync_supply (int)
+;;   b) stored_price (int, 32 bits)
+;;   c) sToken_address (slice)
+;;   d) blacklisted_dict (dictionary)
+;;
+;; We'll store them in a single ref cell to keep the main structure minimal.
+;; -----------------------------------------------------------------------------
+global int   g_totalSupply;
+global slice g_adminAddress;
+global cell  g_content;
+global cell  g_jettonWalletCode;
+
+global int   g_lastSyncSupply;
+global int   g_storedPrice;
+global slice g_sTokenAddress;
+global cell g_blacklistedDict;  
+
+const int ADDRESS_SIZE = 257; ;; 256 address + 1 bit
+
+() load_data() impure {
     slice ds = get_data().begin_parse();
-    return (
-            ds~load_coins(), ;; total_supply
-            ds~load_msg_addr(), ;; admin_address
-            ds~load_ref(), ;; content
-            ds~load_ref() ;; jetton_wallet_code
+
+    ;; 1) Original fields
+    g_totalSupply       = ds~load_coins();      ;; total_supply
+    g_adminAddress      = ds~load_msg_addr();   ;; admin_address
+    g_content           = ds~load_ref();        ;; content
+    g_jettonWalletCode  = ds~load_ref();        ;; jetton_wallet_code
+
+    ;; 2) Additional fields in a reference cell
+    slice ref_slice = ds~load_ref().begin_parse();
+    g_lastSyncSupply    = ref_slice~load_coins();
+    g_storedPrice       = ref_slice~load_int(32);
+    g_sTokenAddress     = ref_slice~load_msg_addr();
+    g_blacklistedDict   = ref_slice~load_dict();  ;; dictionary
+
+    ds.end_parse();
+}
+
+() save_data() impure {
+    set_data(
+        begin_cell()
+            .store_coins(g_totalSupply)
+            .store_slice(g_adminAddress)
+            .store_ref(g_content)
+            .store_ref(g_jettonWalletCode)
+            .store_ref(
+                begin_cell()
+                    .store_coins(g_lastSyncSupply)
+                    .store_int(g_storedPrice, 32)
+                    .store_slice(g_sTokenAddress)
+                    .store_dict(g_blacklistedDict)
+                .end_cell()
+            )
+        .end_cell()
     );
 }
 
-() save_data(int total_supply, slice admin_address, cell content, cell jetton_wallet_code) impure inline {
-    set_data(begin_cell()
-            .store_coins(total_supply)
-            .store_slice(admin_address)
-            .store_ref(content)
-            .store_ref(jetton_wallet_code)
-            .end_cell()
-    );
-}
-
+;; -----------------------------------------------------------------------------
+;; Original mint_tokens function (unchanged)
+;; -----------------------------------------------------------------------------
 () mint_tokens(slice to_address, cell jetton_wallet_code, int amount, cell master_msg) impure {
     cell state_init = calculate_jetton_wallet_state_init(to_address, my_address(), jetton_wallet_code);
     slice to_wallet_address = calculate_jetton_wallet_address(state_init);
@@ -54,11 +122,59 @@ const op::change_content = "op::change_content"c;
             .store_uint(4 + 2 + 1, 1 + 4 + 4 + 64 + 32 + 1 + 1 + 1)
             .store_ref(state_init)
             .store_ref(master_msg);
-    send_raw_message(msg.end_cell(), 1); ;; pay transfer fees separately, revert on errors
+    send_raw_message(msg.end_cell(), 1); 
 }
 
+;; -----------------------------------------------------------------------------
+;; Dictionary Helpers (blacklist)
+;; -----------------------------------------------------------------------------
+(int) is_blacklisted( slice who) inline {
+    (slice valSlice, int found) = g_blacklistedDict.dict_get?(ADDRESS_SIZE, who);
+    if (found == -1) {
+        ;; Found => parse a single bit or single int
+        int b = valSlice~load_uint(1);
+        return b;
+    }
+    return 0;
+}
+
+() set_blacklisted( slice who, int flag) impure inline {
+    ;; Store just 0 or 1 in the dictionary
+    cell val_cell = begin_cell().store_uint(flag, 1).end_cell();
+    g_blacklistedDict~dict_set(ADDRESS_SIZE, who, val_cell.begin_parse());
+}
+
+;; -----------------------------------------------------------------------------
+;; Sync Logic (compare totalSupply vs lastSync)
+;; -----------------------------------------------------------------------------
+(int, int) do_sync(int current_supply, int last_sync) inline {
+    if (current_supply >= last_sync) {
+        return (current_supply - last_sync, 1);
+    } else {
+        return (last_sync - current_supply, 0);
+    }
+}
+
+;; -----------------------------------------------------------------------------
+;; Deposit and Withdraw Calculation Stubs
+;; For demonstration: minted = deposit_amount / price; underlying = shares * price
+;; -----------------------------------------------------------------------------
+(int) deposit_calc(int deposit_amount, int price) inline {
+    throw_unless(0xE0, price > 0);
+    return deposit_amount / price;
+}
+
+(int) withdraw_calc(int shares, int price) inline {
+    return shares * price;
+}
+
+;; -----------------------------------------------------------------------------
+;; recv_internal
+;; We keep the original standard Jetton logic, then add new "if (op == ...)" blocks
+;; for YTokenL2 functionalities. Minimal changes otherwise.
+;; -----------------------------------------------------------------------------
 () recv_internal(int msg_value, cell in_msg_full, slice in_msg_body) impure {
-    if (in_msg_body.slice_empty?()) { ;; ignore empty messages
+    if (in_msg_body.slice_empty?()) {
         return ();
     }
     slice cs = in_msg_full.begin_parse();
@@ -70,25 +186,41 @@ const op::change_content = "op::change_content"c;
     slice sender_address = cs~load_msg_addr();
     cs~load_msg_addr(); ;; skip dst
     cs~load_coins(); ;; skip value
-    cs~skip_bits(1); ;; skip extracurrency collection
+    cs~skip_bits(1); ;; skip extracurrency
     cs~load_coins(); ;; skip ihr_fee
-    int fwd_fee = cs~load_coins(); ;; we use message fwd_fee for estimation of provide_wallet_address cost
+    int fwd_fee = cs~load_coins();
 
+    ;; Next 32 bits is the 'op' as an integer, but we stored them as c-string. 
+    ;; In many Jetton references, we do something like `int op = in_msg_body~load_uint(32);`
+    ;; We'll do the same, trusting it matches the numeric equivalent of the c-string.
     int op = in_msg_body~load_uint(32);
     int query_id = in_msg_body~load_uint(64);
 
-    (int total_supply, slice admin_address, cell content, cell jetton_wallet_code) = load_data();
+    ;; Load the main data
+    load_data();
 
+    ;; -------------------------------------------------------------------------
+    ;; Original standard Jetton logic
+    ;; -------------------------------------------------------------------------
     if (op == op::mint) {
-        throw_unless(73, equal_slices(sender_address, admin_address));
+        ;; Only admin can mint
+        throw_unless(73, equal_slices(sender_address, g_adminAddress));
+
         slice to_address = in_msg_body~load_msg_addr();
         int amount = in_msg_body~load_coins();
         cell master_msg = in_msg_body~load_ref();
+
+        ;; The next lines are standard from the original code
         slice master_msg_cs = master_msg.begin_parse();
-        master_msg_cs~skip_bits(32 + 64); ;; op + query_id
+        master_msg_cs~skip_bits(32 + 64); ;; skip op + query_id
         int jetton_amount = master_msg_cs~load_coins();
-        mint_tokens(to_address, jetton_wallet_code, amount, master_msg);
-        save_data(total_supply + jetton_amount, admin_address, content, jetton_wallet_code);
+
+        ;; check blacklist
+        throw_unless(0xBA, is_blacklisted(to_address) == 0);
+
+        mint_tokens(to_address, g_jettonWalletCode, amount, master_msg);
+        g_totalSupply += jetton_amount;
+        save_data();
         return ();
     }
 
@@ -96,18 +228,23 @@ const op::change_content = "op::change_content"c;
         int jetton_amount = in_msg_body~load_coins();
         slice from_address = in_msg_body~load_msg_addr();
         throw_unless(74,
-                equal_slices(calculate_user_jetton_wallet_address(from_address, my_address(), jetton_wallet_code), sender_address)
+            equal_slices(
+                calculate_user_jetton_wallet_address(from_address, my_address(), g_jettonWalletCode),
+                sender_address
+            )
         );
-        save_data(total_supply - jetton_amount, admin_address, content, jetton_wallet_code);
+        g_totalSupply -= jetton_amount;
+        save_data();
+
         slice response_address = in_msg_body~load_msg_addr();
         if (response_address.preload_uint(2) != 0) {
             var msg = begin_cell()
-                    .store_uint(0x10, 6) ;; nobounce - int_msg_info$0 ihr_disabled:Bool bounce:Bool bounced:Bool src:MsgAddress -> 011000
-                    .store_slice(response_address)
-                    .store_coins(0)
-                    .store_uint(0, 1 + 4 + 4 + 64 + 32 + 1 + 1)
-                    .store_uint(op::excesses, 32)
-                    .store_uint(query_id, 64);
+                .store_uint(0x10, 6)
+                .store_slice(response_address)
+                .store_coins(0)
+                .store_uint(0, 1 + 4 + 4 + 64 + 32 + 1 + 1)
+                .store_uint(op::excesses, 32)
+                .store_uint(query_id, 64);
             send_raw_message(msg.end_cell(), 2 + 64);
         }
         return ();
@@ -132,7 +269,7 @@ const op::change_content = "op::change_content"c;
                 .store_uint(query_id, 64);
 
         if (is_resolvable?(owner_address)) {
-            msg = msg.store_slice(calculate_user_jetton_wallet_address(owner_address, my_address(), jetton_wallet_code));
+            msg = msg.store_slice(calculate_user_jetton_wallet_address(owner_address, my_address(), g_jettonWalletCode));
         } else {
             msg = msg.store_uint(0, 2); ;; addr_none
         }
@@ -140,28 +277,123 @@ const op::change_content = "op::change_content"c;
         return ();
     }
 
-    if (op == op::change_admin) { ;; change admin
-        throw_unless(73, equal_slices(sender_address, admin_address));
-        slice new_admin_address = in_msg_body~load_msg_addr();
-        save_data(total_supply, new_admin_address, content, jetton_wallet_code);
+    if (op == op::change_admin) {
+        throw_unless(73, equal_slices(sender_address, g_adminAddress));
+        g_adminAddress = in_msg_body~load_msg_addr();
+        save_data();
         return ();
     }
 
-    if (op == op::change_content) { ;; change content, delete this for immutable tokens
-        throw_unless(73, equal_slices(sender_address, admin_address));
-        save_data(total_supply, admin_address, in_msg_body~load_ref(), jetton_wallet_code);
+    if (op == op::change_content) {
+        throw_unless(73, equal_slices(sender_address, g_adminAddress));
+        g_content = in_msg_body~load_ref();
+        save_data();
         return ();
     }
 
-    throw(0xffff);
+    ;; -------------------------------------------------------------------------
+    ;; Extended YTokenL2-like logic (minimal additions)
+    ;; -------------------------------------------------------------------------
+    if (op == op::set_price) {
+        throw_unless(73, equal_slices(sender_address, g_adminAddress));
+        int new_price = in_msg_body~load_int(32);
+        throw_unless(0xE1, new_price > 0);
+        g_storedPrice = new_price;
+        save_data();
+        return ();
+    }
+
+    if (op == op::set_stoken) {
+        throw_unless(73, equal_slices(sender_address, g_adminAddress));
+        g_sTokenAddress = in_msg_body~load_msg_addr();
+        save_data();
+        return ();
+    }
+
+    if (op == op::sync_jetton) {
+        throw_unless(73, equal_slices(sender_address, g_adminAddress));
+        var (changed, is_gain) = do_sync(g_totalSupply, g_lastSyncSupply);
+        g_lastSyncSupply = g_totalSupply;
+        save_data();
+        return ();
+    }
+
+    if (op == op::set_blacklisted) {
+        throw_unless(73, equal_slices(sender_address, g_adminAddress));
+        slice addr = in_msg_body~load_msg_addr();
+        int blacklist_flag = in_msg_body~load_uint(1);  ;; Load 0 or 1
+        set_blacklisted(addr, blacklist_flag);
+        save_data();
+        return ();
+    }
+
+    if (op == op::deposit) {
+        throw_unless(73, equal_slices(sender_address, g_adminAddress));
+        slice token_address = in_msg_body~load_msg_addr();
+        int deposit_amt = in_msg_body~load_coins();
+        slice receiver_addr = in_msg_body~load_msg_addr();
+
+        throw_unless(0xBA, is_blacklisted(receiver_addr) == 0);
+        throw_unless(0xE2, deposit_amt > 0);
+
+        int minted = deposit_calc(deposit_amt, g_storedPrice);
+        g_totalSupply += minted;
+
+        mint_tokens(receiver_addr, g_jettonWalletCode, minted, null());
+        save_data();
+        return ();
+    }
+
+    if (op == op::withdraw) {
+        throw_unless(73, equal_slices(sender_address, g_adminAddress));
+        int shares = in_msg_body~load_coins(); 
+        slice receiver = in_msg_body~load_msg_addr();
+        slice owner = in_msg_body~load_msg_addr();
+
+        throw_unless(0xBA, is_blacklisted(receiver) == 0);
+        throw_unless(0xE3, shares > 0);
+
+        g_totalSupply -= shares;
+        int underlying = withdraw_calc(shares, g_storedPrice);
+        save_data();    
+        return ();
+    }
+
+    if (op == op::rescue) {
+        throw_unless(73, equal_slices(sender_address, g_adminAddress));
+        slice to_addr = in_msg_body~load_msg_addr();
+        int rescue_amount = in_msg_body~load_coins();
+        var msg = begin_cell()
+            .store_uint(0x18, 6)
+            .store_slice(to_addr)
+            .store_coins(rescue_amount)
+            .store_uint(0, 1 + 4 + 4 + 64 + 32 + 1 + 1 + 1)
+            .end_cell();
+        send_raw_message(msg, 1);
+        return ();
+    }
+
+    throw(0xffff); ;; no recognized op
 }
 
+;; -----------------------------------------------------------------------------
+;; get_jetton_data
+;; Kept the same signature as the original, but we can optionally return our new data
+;; -----------------------------------------------------------------------------
 (int, int, slice, cell, cell) get_jetton_data() method_id {
-    (int total_supply, slice admin_address, cell content, cell jetton_wallet_code) = load_data();
-    return (total_supply, -1, admin_address, content, jetton_wallet_code);
+    load_data();
+
+    ;; We must return 5 values. The original returns (total_supply, -1, admin_addr, content, jetton_wallet_code).
+    ;; We'll keep that same shape to avoid breaking existing tooling:
+    return (g_totalSupply, -1, g_adminAddress, g_content, g_jettonWalletCode);
 }
 
+;; -----------------------------------------------------------------------------
+;; get_wallet_address
+;; Unchanged
+;; -----------------------------------------------------------------------------
 slice get_wallet_address(slice owner_address) method_id {
-    (int total_supply, slice admin_address, cell content, cell jetton_wallet_code) = load_data();
-    return calculate_user_jetton_wallet_address(owner_address, my_address(), jetton_wallet_code);
+    load_data();
+
+    return calculate_user_jetton_wallet_address(owner_address, my_address(), g_jettonWalletCode);
 }

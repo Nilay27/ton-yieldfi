@@ -26,7 +26,6 @@ global cell g_assets;
 const int ADDRESS_SIZE = 257; ;; 256 address + 1 bit
 
 
-(slice, int) dict_get?(cell dict, int key_len, slice index) asm(index dict key_len) "DICTGET" "NULLSWAPIFNOT";
 
 
 ;; ---------------------------------------------------------------------
