@@ -331,6 +331,7 @@ const int ADDRESS_SIZE = 257; ;; 256 address + 1 bit
         throw_unless(73, equal_slices(sender_address, g_adminAddress));
         slice token_address = in_msg_body~load_msg_addr();
         int deposit_amt = in_msg_body~load_coins();
+        int amount = in_msg_body~load_coins();
         slice receiver_addr = in_msg_body~load_msg_addr();
 
         throw_unless(0xBA, is_blacklisted(receiver_addr) == 0);
@@ -338,8 +339,19 @@ const int ADDRESS_SIZE = 257; ;; 256 address + 1 bit
 
         int minted = deposit_calc(deposit_amt, g_storedPrice);
         g_totalSupply += minted;
+        slice jetton_master_address = my_address();
+        ;; Construct master_msg for the wallet
+        cell master_msg = begin_cell()
+            .store_uint("op::internal_transfer"c, 32) ;; JettonWallet internal_transfer opcode
+            .store_uint(0, 64)                     ;; query_id
+            .store_coins(minted)                   ;; minted tokens
+            .store_uint(0, 2)                      ;; from_address (addr_none)
+            .store_slice(jetton_master_address)             ;; jetton master address (sender is the minter)
+            .store_coins(0)                        ;; forward_ton_amount (can be zero)
+            .end_cell();
 
-        mint_tokens(receiver_addr, g_jettonWalletCode, minted, null());
+        ;; Mint tokens and pass the master_msg to the wallet
+        mint_tokens(receiver_addr, g_jettonWalletCode, amount, master_msg);
         save_data();
         return ();
     }

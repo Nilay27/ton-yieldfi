@@ -10,11 +10,15 @@ import {
     SendMode,
 } from '@ton/core';
 import { crc32 } from 'crc';
+import * as walletdata from '../build/JettonWallet.compiled.json';
+import { JettonWalletOpcodes } from './JettonWallet';
 
 // Helper function to calculate the opcode dynamically
 function calculateOpcode(opName: string): number {
     return crc32(opName) >>> 0;
 }
+
+export const JETTON_WALLET_CODE = Cell.fromBoc(Buffer.from(walletdata.hex, 'hex'))[0];
 
 // Define the opcodes dynamically
 export const JettonMinterOpcodes = {
@@ -38,7 +42,6 @@ export const JettonMinterOpcodes = {
 export type JettonMinterConfig = {
     adminAddress: Address;
     content: Cell;
-    jettonWalletCode: Cell;
     // Additional fields
     totalSupply?: bigint;
     lastSyncSupply?: bigint;
@@ -63,7 +66,7 @@ export function jettonMinterConfigToCell(config: JettonMinterConfig): Cell {
         .storeCoins(config.totalSupply ?? 0n)
         .storeAddress(config.adminAddress)
         .storeRef(config.content)
-        .storeRef(config.jettonWalletCode)
+        .storeRef(JETTON_WALLET_CODE)
         .storeRef(additionalData)
         .endCell();
 }
@@ -100,10 +103,16 @@ export class JettonMinter implements Contract {
             queryId?: number;
         }
     ) {
+        const forward_ton_amount = opts.amount/5n;
+
         const masterMessage = beginCell()
-            .storeUint(JettonMinterOpcodes.takeWalletAddress, 32)
+            .storeUint(JettonWalletOpcodes.internalTransfer, 32)
             .storeUint(opts.queryId ?? 0, 64)
             .storeCoins(opts.jettonAmount)
+            .storeAddress(null)
+            .storeAddress(this.address)
+            .storeCoins(forward_ton_amount)
+            .storeMaybeRef(null)
             .endCell();
 
         const body = beginCell()
@@ -270,6 +279,7 @@ export class JettonMinter implements Contract {
 
     async sendDeposit(provider: ContractProvider, via: Sender, opts: {
         value: bigint;
+        amount: bigint;
         tokenAddress: Address;
         depositAmount: bigint;
         receiverAddress: Address;
@@ -280,6 +290,7 @@ export class JettonMinter implements Contract {
             .storeUint(opts.queryId ?? 0, 64)
             .storeAddress(opts.tokenAddress)
             .storeCoins(opts.depositAmount)
+            .storeCoins(opts.amount)
             .storeAddress(opts.receiverAddress)
             .endCell();
 

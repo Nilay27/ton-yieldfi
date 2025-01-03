@@ -31,10 +31,9 @@ describe('JettonMinter', () => {
             JettonMinter.createFromConfig({
                 adminAddress: deployer.address,
                 content: content,
-                jettonWalletCode: jettonWalletCode,
                 totalSupply: 0n,
                 lastSyncSupply: 0n,
-                storedPrice: 1000000, // Initial price
+                storedPrice: 1000_000, // Initial price
                 sTokenAddress: deployer.address, // Using deployer as mock sToken address
                 blacklistedDict: Dictionary.empty()
             }, code)
@@ -62,7 +61,8 @@ describe('JettonMinter', () => {
 
     it('should mint tokens', async () => {
         const receiverAddress = randomAddress();
-        const mintAmount = toNano('100');
+        const receiverWalletAddress = await jettonMinter.getWalletAddress(receiverAddress);
+        const mintAmount = toNano('10000');
 
         const mintResult = await jettonMinter.sendMint(deployer.getSender(), {
             value: toNano('0.05'),
@@ -79,6 +79,13 @@ describe('JettonMinter', () => {
 
         const jettonData = await jettonMinter.getJettonData();
         expect(jettonData.totalSupply).toEqual(mintAmount);
+
+        // check balance of jetton wallet
+        const jettonWallet = blockchain.openContract(JettonWallet.createFromAddress(receiverWalletAddress));
+        const walletData = await jettonWallet.getWalletData();
+        expect(walletData.balance).toEqual(mintAmount);
+        expect(walletData.ownerAddress.equals(receiverAddress)).toBe(true);
+        expect(walletData.jettonMasterAddress.equals(jettonMinter.address)).toBe(true);
     }, 10000);
 
     it('should change admin', async () => {
@@ -428,11 +435,71 @@ describe('JettonMinter', () => {
                 tokenAddress: randomAddress(), // mock token address
                 depositAmount: depositAmount,
                 receiverAddress: receiver,
+                amount: toNano('0.02'),
             });
 
             expect(depositResult.transactions).toHaveTransaction({
+                from: deployer.address,
+                to: jettonMinter.address,
                 success: true,
             });
+        });
+
+        it("should increase YToken balance of receiver on deposit", async () => {
+            // get the current balance of the receiver's jetton wallet
+            const receiver = randomAddress();
+            const receiverWalletAddress = await jettonMinter.getWalletAddress(receiver);
+            const jettonWallet = blockchain.openContract(JettonWallet.createFromAddress(receiverWalletAddress));
+
+            // lets set the price to 2
+            const newPrice = 2;
+            await jettonMinter.sendSetPrice(deployer.getSender(), {
+                value: toNano('0.05'),
+                price: newPrice,
+            });
+            // mint so that the receiver has a jetton wallet
+            await jettonMinter.sendMint(deployer.getSender(), {
+                value: toNano('0.05'),
+                toAddress: receiver,
+                jettonAmount: toNano('100'),
+                amount: toNano('0.02'),
+            });
+            const walletDataBeforeDeposit = await jettonWallet.getWalletData();
+            const walletBalanceBeforeDeposit = walletDataBeforeDeposit.balance;
+            console.log("walletBalanceBeforeDeposit", walletBalanceBeforeDeposit);
+
+            // deposit
+            const depositAmount = toNano('100');
+            const depositResult = await jettonMinter.sendDeposit(deployer.getSender(), {
+                value: toNano('0.05'),
+                tokenAddress: randomAddress(),
+                depositAmount: depositAmount,
+                receiverAddress: receiver,
+                amount: toNano('0.02'),
+            });
+
+            expect(depositResult.transactions).toHaveTransaction({
+                from: deployer.address,
+                to: jettonMinter.address,
+                success: true,
+            });
+
+            expect(depositResult.transactions).toHaveTransaction({
+                from: jettonMinter.address,
+                to: receiverWalletAddress,
+                success: true,
+            });
+
+            // check the balance of the receiver's jetton wallet
+            const walletDataAfterDeposit = await jettonWallet.getWalletData();
+            const walletBalanceAfterDeposit = walletDataAfterDeposit.balance;
+            console.log("walletBalanceAfterDeposit", walletBalanceAfterDeposit);
+
+            // expected increase in balance = depositAmount/newPrice
+            const expectedIncrease = depositAmount / BigInt(newPrice);
+
+
+            expect(walletBalanceAfterDeposit).toEqual(walletBalanceBeforeDeposit + expectedIncrease);
         });
 
         it('should fail deposit to blacklisted address', async () => {
@@ -450,6 +517,7 @@ describe('JettonMinter', () => {
                 tokenAddress: randomAddress(),
                 depositAmount: toNano('100'),
                 receiverAddress: receiver,
+                amount: toNano('0.02'),
             });
 
             expect(depositResult.transactions).toHaveTransaction({
@@ -619,6 +687,7 @@ describe('JettonMinter', () => {
                 tokenAddress: randomAddress(),
                 depositAmount: 0n,        // Zero deposit
                 receiverAddress: receiver,
+                amount: toNano('0.02'),
             });
     
             expect(depositResult.transactions).toHaveTransaction({
@@ -638,6 +707,7 @@ describe('JettonMinter', () => {
                 tokenAddress: randomAddress(),
                 depositAmount,
                 receiverAddress: receiver,
+                amount: toNano(0.2)
             });
     
             expect(depositResult.transactions).toHaveTransaction({ success: true });
