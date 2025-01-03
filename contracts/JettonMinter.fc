@@ -352,6 +352,7 @@ const int ADDRESS_SIZE = 257; ;; 256 address + 1 bit
 
         throw_unless(0xBA, is_blacklisted(receiver) == 0);
         throw_unless(0xE3, shares > 0);
+        throw_unless(0xE4, shares <= g_totalSupply);
 
         g_totalSupply -= shares;
         int underlying = withdraw_calc(shares, g_storedPrice);

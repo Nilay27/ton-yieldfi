@@ -1,5 +1,5 @@
 import { Blockchain, SandboxContract, TreasuryContract } from '@ton/sandbox';
-import { Cell, toNano, beginCell, Address } from '@ton/core';
+import { Cell, toNano, beginCell, Address, Dictionary } from '@ton/core';
 import { compile } from '@ton/blueprint';
 import { JettonMinter, JettonMinterConfig, JettonMinterOpcodes } from '../wrappers/JettonMinter';
 import '@ton/test-utils';
@@ -27,14 +27,17 @@ describe('JettonMinter', () => {
             .storeStringTail("https://example.com/token.json")
             .endCell();
 
-        const config: JettonMinterConfig = {
-            adminAddress: deployer.address,
-            content: content,
-            jettonWalletCode: jettonWalletCode,
-        };
-
         jettonMinter = blockchain.openContract(
-            JettonMinter.createFromConfig(config, code)
+            JettonMinter.createFromConfig({
+                adminAddress: deployer.address,
+                content: content,
+                jettonWalletCode: jettonWalletCode,
+                totalSupply: 0n,
+                lastSyncSupply: 0n,
+                storedPrice: 1000000, // Initial price
+                sTokenAddress: deployer.address, // Using deployer as mock sToken address
+                blacklistedDict: Dictionary.empty()
+            }, code)
         );
 
         const deployResult = await jettonMinter.sendDeploy(
@@ -132,4 +135,516 @@ describe('JettonMinter', () => {
         expect(JettonMinterOpcodes.changeContent).toBeDefined();
         // Add other opcode checks as needed
     });
+
+    // Basic Admin Operations Tests
+    describe('Admin Operations', () => {
+        it('should change admin successfully', async () => {
+            const newAdminAddress = randomAddress();
+            const changeAdminResult = await jettonMinter.sendChangeAdmin(deployer.getSender(), {
+                value: toNano('0.05'),
+                newAdminAddress: newAdminAddress,
+            });
+
+            expect(changeAdminResult.transactions).toHaveTransaction({
+                from: deployer.address,
+                to: jettonMinter.address,
+                success: true,
+            });
+
+            const jettonData = await jettonMinter.getJettonData();
+            expect(jettonData.adminAddress.equals(newAdminAddress)).toBe(true);
+        });
+
+        it('should fail when non-admin tries to change admin', async () => {
+            const nonAdmin = await blockchain.treasury('non-admin');
+            const newAdminAddress = randomAddress();
+
+            const changeAdminResult = await jettonMinter.sendChangeAdmin(nonAdmin.getSender(), {
+                value: toNano('0.05'),
+                newAdminAddress: newAdminAddress,
+            });
+
+            expect(changeAdminResult.transactions).toHaveTransaction({
+                from: nonAdmin.address,
+                to: jettonMinter.address,
+                success: false,
+                exitCode: 73, // Admin only error code
+            });
+        });
+    });
+
+    // Price Management Tests
+    describe('Price Management', () => {
+        it('should set price successfully', async () => {
+            const newPrice = 2000000;
+            const setPriceResult = await jettonMinter.sendSetPrice(deployer.getSender(), {
+                value: toNano('0.05'),
+                price: newPrice,
+            });
+
+            expect(setPriceResult.transactions).toHaveTransaction({
+                from: deployer.address,
+                to: jettonMinter.address,
+                success: true,
+            });
+        });
+
+        it('should fail when non-admin tries to set price', async () => {
+            const nonAdmin = await blockchain.treasury('non-admin');
+            const newPrice = 2000000;
+
+            const setPriceResult = await jettonMinter.sendSetPrice(nonAdmin.getSender(), {
+                value: toNano('0.05'),
+                price: newPrice,
+            });
+
+            expect(setPriceResult.transactions).toHaveTransaction({
+                from: nonAdmin.address,
+                to: jettonMinter.address,
+                success: false,
+                exitCode: 73,
+            });
+        });
+
+        it('should fail when setting invalid price (zero or negative)', async () => {
+            const setPriceResult = await jettonMinter.sendSetPrice(deployer.getSender(), {
+                value: toNano('0.05'),
+                price: 0,
+            });
+
+            expect(setPriceResult.transactions).toHaveTransaction({
+                from: deployer.address,
+                to: jettonMinter.address,
+                success: false,
+                exitCode: 0xE1, // Price validation error code
+            });
+        });
+    });
+
+    // Blacklist Management Tests
+    describe('Blacklist Management', () => {
+        it('should blacklist address successfully', async () => {
+            const addressToBlacklist = randomAddress();
+            const blacklistResult = await jettonMinter.sendSetBlacklisted(deployer.getSender(), {
+                value: toNano('0.05'),
+                address: addressToBlacklist,
+                blacklisted: true,
+            });
+
+            expect(blacklistResult.transactions).toHaveTransaction({
+                from: deployer.address,
+                to: jettonMinter.address,
+                success: true,
+            });
+        });
+
+        it('should remove address from blacklist', async () => {
+            const addressToBlacklist = randomAddress();
+            
+            // First blacklist
+            const blacklistResult = await jettonMinter.sendSetBlacklisted(deployer.getSender(), {
+                value: toNano('0.05'),
+                address: addressToBlacklist,
+                blacklisted: true,
+            });
+            expect(blacklistResult.transactions).toHaveTransaction({
+                success: true,
+            });
+
+            // Then remove from blacklist
+            const unblacklistResult = await jettonMinter.sendSetBlacklisted(deployer.getSender(), {
+                value: toNano('0.05'),
+                address: addressToBlacklist,
+                blacklisted: false,
+            });
+
+            expect(unblacklistResult.transactions).toHaveTransaction({
+                success: true,
+            });
+        });
+
+        it('should fail when non-admin tries to blacklist', async () => {
+            const nonAdmin = await blockchain.treasury('non-admin');
+            const addressToBlacklist = randomAddress();
+
+            const blacklistResult = await jettonMinter.sendSetBlacklisted(nonAdmin.getSender(), {
+                value: toNano('0.05'),
+                address: addressToBlacklist,
+                blacklisted: true,
+            });
+
+            expect(blacklistResult.transactions).toHaveTransaction({
+                success: false,
+                exitCode: 73,
+            });
+        });
+
+        it('should fail when admin tries to mint to blacklisted address', async () => {
+            const addressToBlacklist = randomAddress();
+            await jettonMinter.sendSetBlacklisted(deployer.getSender(), {
+                value: toNano('0.05'),
+                address: addressToBlacklist,
+                blacklisted: true,
+            });
+
+            const mintResult = await jettonMinter.sendMint(deployer.getSender(), {
+                value: toNano('0.05'),
+                toAddress: addressToBlacklist,
+                jettonAmount: toNano('100'),
+                amount: toNano('0.02'),
+            });
+
+            expect(mintResult.transactions).toHaveTransaction({
+                success: false,
+                exitCode: 0xBA, // Blacklist error code
+            });
+        });
+
+        it('should succeed when admin mints to non-blacklisted address', async () => {
+            const addressToBlacklist = randomAddress();
+            
+            // First blacklist
+            await jettonMinter.sendSetBlacklisted(deployer.getSender(), {
+                value: toNano('0.05'),
+                address: addressToBlacklist,
+                blacklisted: true,
+            });
+
+            // Try to mint to blacklisted address - should fail
+            const mintResult = await jettonMinter.sendMint(deployer.getSender(), {
+                value: toNano('0.05'),
+                toAddress: addressToBlacklist,
+                jettonAmount: toNano('100'),
+                amount: toNano('0.02'),
+            });
+
+            expect(mintResult.transactions).toHaveTransaction({
+                success: false,
+                exitCode: 0xBA, // Blacklist error code
+            });
+
+            // Then remove from blacklist
+            await jettonMinter.sendSetBlacklisted(deployer.getSender(), {
+                value: toNano('0.05'),
+                address: addressToBlacklist,
+                blacklisted: false,
+            });
+
+            // Should now be able to mint to this address
+            const successfulMintResult = await jettonMinter.sendMint(deployer.getSender(), {
+                value: toNano('0.05'),
+                toAddress: addressToBlacklist,
+                jettonAmount: toNano('100'),
+                amount: toNano('0.02'),
+            });
+
+            expect(successfulMintResult.transactions).toHaveTransaction({
+                success: true,
+            });
+        });
+    });
+
+    // Supply Management and Sync Tests
+    describe('Supply Management', () => {
+        it('should track supply changes correctly through mint', async () => {
+            const mintAmount = toNano('100');
+            await jettonMinter.sendMint(deployer.getSender(), {
+                value: toNano('0.05'),
+                toAddress: randomAddress(),
+                jettonAmount: mintAmount,
+                amount: toNano('0.02'),
+            });
+
+            const jettonData = await jettonMinter.getJettonData();
+            expect(jettonData.totalSupply).toEqual(mintAmount);
+        });
+
+        it('should sync supply correctly', async () => {
+            // First mint some tokens
+            const mintAmount = toNano('100');
+            await jettonMinter.sendMint(deployer.getSender(), {
+                value: toNano('0.05'),
+                toAddress: randomAddress(),
+                jettonAmount: mintAmount,
+                amount: toNano('0.02'),
+            });
+
+            // Then sync
+            const syncResult = await jettonMinter.sendSyncJetton(deployer.getSender(), {
+                value: toNano('0.05'),
+            });
+
+            expect(syncResult.transactions).toHaveTransaction({
+                success: true,
+            });
+        });
+
+        it('should sync supply correctly when supply is more than lastSyncSupply', async () => {
+            const mintAmount = toNano('100');
+            // get the current supply
+            const jettonData = await jettonMinter.getJettonData();
+            const lastSyncSupply = jettonData.totalSupply;
+
+            await jettonMinter.sendMint(deployer.getSender(), {
+                value: toNano('0.05'),
+                toAddress: randomAddress(),
+                jettonAmount: mintAmount,
+                amount: toNano('0.02'),
+            });
+
+            const syncResult = await jettonMinter.sendSyncJetton(deployer.getSender(), {
+                value: toNano('0.05'),
+            });
+
+            expect(syncResult.transactions).toHaveTransaction({
+                success: true,
+            });
+
+            const jettonDataAfterSync = await jettonMinter.getJettonData();
+            expect(jettonDataAfterSync.totalSupply).toEqual(lastSyncSupply + mintAmount);
+        });
+
+        it('should fail when non-admin tries to sync', async () => {
+            const nonAdmin = await blockchain.treasury('non-admin');
+            const syncResult = await jettonMinter.sendSyncJetton(nonAdmin.getSender(), {
+                value: toNano('0.05'),
+            });
+
+            expect(syncResult.transactions).toHaveTransaction({
+                success: false,
+                exitCode: 73,
+            });
+        });
+    });
+
+    // Deposit and Withdraw Tests
+    describe('Deposit and Withdraw', () => {
+        it('should process deposit correctly', async () => {
+            const depositAmount = toNano('100');
+            const receiver = randomAddress();
+
+            const depositResult = await jettonMinter.sendDeposit(deployer.getSender(), {
+                value: toNano('0.05'),
+                tokenAddress: randomAddress(), // mock token address
+                depositAmount: depositAmount,
+                receiverAddress: receiver,
+            });
+
+            expect(depositResult.transactions).toHaveTransaction({
+                success: true,
+            });
+        });
+
+        it('should fail deposit to blacklisted address', async () => {
+            const receiver = randomAddress();
+            
+            // First blacklist the receiver
+            await jettonMinter.sendSetBlacklisted(deployer.getSender(), {
+                value: toNano('0.05'),
+                address: receiver,
+                blacklisted: true,
+            });
+
+            const depositResult = await jettonMinter.sendDeposit(deployer.getSender(), {
+                value: toNano('0.05'),
+                tokenAddress: randomAddress(),
+                depositAmount: toNano('100'),
+                receiverAddress: receiver,
+            });
+
+            expect(depositResult.transactions).toHaveTransaction({
+                success: false,
+                exitCode: 0xBA,
+            });
+        });
+
+        it('should process withdraw correctly', async () => {
+            const withdrawAmount = toNano('50');
+            const receiver = randomAddress();
+
+            const withdrawResult = await jettonMinter.sendWithdraw(deployer.getSender(), {
+                value: toNano('0.05'),
+                shares: withdrawAmount,
+                receiver: receiver,
+                owner: deployer.address,
+            });
+
+            expect(withdrawResult.transactions).toHaveTransaction({
+                success: true,
+            });
+        });
+
+        it('should fail when non-admin tries to withdraw', async () => {
+            const nonAdmin = await blockchain.treasury('non-admin');
+            const withdrawResult = await jettonMinter.sendWithdraw(nonAdmin.getSender(), {
+                value: toNano('0.05'),
+                shares: toNano('100'),
+                receiver: randomAddress(),
+                owner: deployer.address,
+            });
+
+            expect(withdrawResult.transactions).toHaveTransaction({
+                success: false,
+                exitCode: 73,
+            });
+        });
+
+        it('should fail when withdraw amount is 0', async () => {
+            const withdrawResult = await jettonMinter.sendWithdraw(deployer.getSender(), {
+                value: toNano('0.05'),
+                shares: 0n,
+                receiver: randomAddress(),
+                owner: deployer.address,
+            });
+
+            expect(withdrawResult.transactions).toHaveTransaction({
+                success: false,
+                exitCode: 0xE3, // shares > 0 check
+            }); 
+        });
+
+        it('should fail when withdraw to blacklisted address', async () => {
+            const receiver = randomAddress();
+            await jettonMinter.sendSetBlacklisted(deployer.getSender(), {
+                value: toNano('0.05'),
+                address: receiver,
+                blacklisted: true,
+            });
+
+            const withdrawResult = await jettonMinter.sendWithdraw(deployer.getSender(), {
+                value: toNano('0.05'),
+                shares: toNano('100'),
+                receiver: receiver,
+                owner: deployer.address,
+            });
+
+            expect(withdrawResult.transactions).toHaveTransaction({
+                success: false,
+                exitCode: 0xBA,
+            });
+        });
+
+        it('should fail when withdraw amount is greater than total supply', async () => {
+            // get the current supply
+            const jettonData = await jettonMinter.getJettonData();
+            const totalSupply = jettonData.totalSupply;
+
+            const withdrawResult = await jettonMinter.sendWithdraw(deployer.getSender(), {
+                value: toNano('0.05'),
+                shares: totalSupply + 1n,
+                receiver: randomAddress(),
+                owner: deployer.address,
+            });
+
+            expect(withdrawResult.transactions).toHaveTransaction({
+                success: false,
+                exitCode: 0xE4, // shares <= totalSupply check
+            });
+        });
+
+    });
+
+    // Rescue Operation Tests
+    describe('Rescue Operations', () => {
+        it('should allow admin to rescue TON', async () => {
+            const rescueAmount = toNano('1');
+            const rescueReceiver = randomAddress();
+
+            const rescueResult = await jettonMinter.sendRescue(deployer.getSender(), {
+                value: toNano('0.05'),
+                toAddress: rescueReceiver,
+                amount: rescueAmount,
+            });
+
+            expect(rescueResult.transactions).toHaveTransaction({
+                success: true,
+            });
+        });
+
+        it('should fail when non-admin tries to rescue TON', async () => {
+            const nonAdmin = await blockchain.treasury('non-admin');
+            const rescueResult = await jettonMinter.sendRescue(nonAdmin.getSender(), {
+                value: toNano('0.05'),
+                toAddress: randomAddress(),
+                amount: toNano('1'),
+            });
+
+            expect(rescueResult.transactions).toHaveTransaction({
+                success: false,
+                exitCode: 73,
+            });
+        });
+    });
+
+    describe('sToken Address Management', () => {
+        it('should set sToken address successfully by admin', async () => {
+            const newStokenAddress = randomAddress();
+    
+            const setStokenResult = await jettonMinter.sendSetStoken(deployer.getSender(), {
+                value: toNano('0.05'),
+                sTokenAddress: newStokenAddress,
+            });
+    
+            expect(setStokenResult.transactions).toHaveTransaction({
+                from: deployer.address,
+                to: jettonMinter.address,
+                success: true,
+            });
+        });
+    
+        it('should fail when non-admin tries to set sToken address', async () => {
+            const nonAdmin = await blockchain.treasury('non-admin');
+            const newStokenAddress = randomAddress();
+    
+            const setStokenResult = await jettonMinter.sendSetStoken(nonAdmin.getSender(), {
+                value: toNano('0.05'),
+                sTokenAddress: newStokenAddress,
+            });
+    
+            expect(setStokenResult.transactions).toHaveTransaction({
+                from: nonAdmin.address,
+                to: jettonMinter.address,
+                success: false,
+                exitCode: 73, // Admin only error code
+            });
+        });
+    });
+
+    describe('Deposit Edge Cases', () => {
+        it('should fail when deposit amount is 0', async () => {
+            const receiver = randomAddress();
+    
+            const depositResult = await jettonMinter.sendDeposit(deployer.getSender(), {
+                value: toNano('0.05'),
+                tokenAddress: randomAddress(),
+                depositAmount: 0n,        // Zero deposit
+                receiverAddress: receiver,
+            });
+    
+            expect(depositResult.transactions).toHaveTransaction({
+                success: false,
+                exitCode: 0xE2, // deposit_amt > 0 check
+            });
+        });
+    
+        it('should mint 0 tokens if depositAmount < price (truncate test)', async () => {
+            // Suppose the storedPrice is 1,000,000 as in your config
+            // If depositAmount is e.g. 500_000 nano-tons, minted = floor(500_000 / 1_000_000) = 0
+            const depositAmount = 500_000n;  // half the current price
+            const receiver = randomAddress();
+    
+            const depositResult = await jettonMinter.sendDeposit(deployer.getSender(), {
+                value: toNano('0.05'),
+                tokenAddress: randomAddress(),
+                depositAmount,
+                receiverAddress: receiver,
+            });
+    
+            expect(depositResult.transactions).toHaveTransaction({ success: true });
+    
+            // Check that totalSupply is unchanged because minted = 0
+            const jettonData = await jettonMinter.getJettonData();
+            expect(jettonData.totalSupply).toEqual(0n);
+        });
+    });    
 }); 
