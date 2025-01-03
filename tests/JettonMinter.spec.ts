@@ -646,5 +646,41 @@ describe('JettonMinter', () => {
             const jettonData = await jettonMinter.getJettonData();
             expect(jettonData.totalSupply).toEqual(0n);
         });
-    });    
+    }); 
+    
+    describe('Content Management', () => {
+        it('should update contract content properly if admin', async () => {
+            const newContent = beginCell()
+                .storeUint(2, 8)
+                .storeStringTail("https://example.com/new_token.json")
+                .endCell();
+    
+            await jettonMinter.sendChangeContent(deployer.getSender(), {
+                value: toNano('0.05'),
+                content: newContent
+            });
+    
+            const jettonData = await jettonMinter.getJettonData();
+            expect(jettonData.content.equals(newContent)).toBe(true);
+        });
+
+        it('should fail when non-admin tries to update contract content', async () => {
+            const nonAdmin = await blockchain.treasury('non-admin');
+            const newContent = beginCell()
+                .storeUint(2, 8)
+                .storeStringTail("https://example.com/new_token.json")
+                .endCell();
+
+            const changeContentResult = await jettonMinter.sendChangeContent(nonAdmin.getSender(), {
+                value: toNano('0.05'),
+                content: newContent
+            });
+
+            expect(changeContentResult.transactions).toHaveTransaction({
+                success: false,
+                exitCode: 73, // Admin only error code
+            });
+        });
+    });
+    
 }); 

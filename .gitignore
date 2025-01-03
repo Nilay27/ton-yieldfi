@@ -3,6 +3,7 @@ temp
 build
 dist
 .DS_Store
+.VSCodeCounter
 
 # VS Code
 .vscode/*
